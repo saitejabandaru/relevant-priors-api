@@ -1,16 +1,35 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import Dict, Any
 import re
+import logging
 
 app = FastAPI()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def normalize(text: str) -> str:
     if not text:
         return ""
+
     text = text.upper()
-    text = text.replace("CNTRST", "CONTRAST")
+
+    replacements = {
+        "CNTRST": "CONTRAST",
+        "CONTRST": "CONTRAST",
+        "W/O": " WITHOUT ",
+        "WO ": " WITHOUT ",
+        "W/": " WITH ",
+        "&": " AND ",
+        "LT": " LEFT ",
+        "RT": " RIGHT ",
+        "BILAT": " BILATERAL ",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
     text = re.sub(r"[^A-Z0-9 ]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -18,12 +37,38 @@ def normalize(text: str) -> str:
 
 def get_modality(desc: str) -> str:
     desc = normalize(desc)
-    modalities = ["MRI", "CT", "XR", "US", "ULTRASOUND", "PET", "NM", "MAMMO"]
-    for m in modalities:
-        if desc.startswith(m + " ") or desc == m:
-            if m == "ULTRASOUND":
-                return "US"
-            return m
+    padded = f" {desc} "
+
+    if "MAM" in desc or "TOMO" in desc:
+        return "MAMMO"
+
+    if desc.startswith("CTA") or " CTA " in padded:
+        return "CTA"
+
+    if desc.startswith("MRA") or " MRA " in padded:
+        return "MRA"
+
+    if desc.startswith("MRI") or desc.startswith("MR ") or " MRI " in padded:
+        return "MRI"
+
+    if desc.startswith("CT") or " CT " in padded:
+        return "CT"
+
+    if desc.startswith("XR") or "X RAY" in desc or "RADIOGRAPH" in desc:
+        return "XR"
+
+    if desc.startswith("US") or "ULTRASOUND" in desc or " US " in padded or "DOPPLER" in desc:
+        return "US"
+
+    if desc.startswith("NM") or "NUC MED" in desc or "SPECT" in desc:
+        return "NM"
+
+    if "PET" in desc:
+        return "PET"
+
+    if desc.startswith("FL") or "FLUORO" in desc:
+        return "FL"
+
     return ""
 
 
@@ -31,23 +76,47 @@ def get_body_region(desc: str) -> str:
     desc = normalize(desc)
 
     region_keywords = {
-        "brain_head": ["BRAIN", "HEAD", "SKULL"],
-        "chest": ["CHEST", "THORAX", "LUNG", "RIB"],
-        "abdomen": ["ABDOMEN", "ABD", "LIVER", "KIDNEY", "RENAL", "PELVIS"],
-        "spine": ["SPINE", "CERVICAL", "THORACIC", "LUMBAR"],
-        "neck": ["NECK", "SOFT TISSUE NECK"],
-        "cardiac": ["CARDIAC", "HEART", "CORONARY"],
-        "breast": ["BREAST", "MAMMO"],
-        "extremity": [
-            "SHOULDER", "ELBOW", "WRIST", "HAND",
-            "HIP", "KNEE", "ANKLE", "FOOT", "FEMUR", "TIBIA", "FIBULA"
+        "brain_head": [
+            "BRAIN", "HEAD", "SKULL", "SINUS", "ORBIT", "FACE", "FACIAL"
         ],
-        "vascular": ["ANGIO", "CTA", "MRA", "ARTERY", "VEIN", "VASCULAR"],
+        "chest": [
+            "CHEST", "THORAX", "LUNG", "PULMONARY", "RIB", "STERNUM"
+        ],
+        "abdomen": [
+            "ABDOMEN", "ABD", "LIVER", "HEPATIC", "GALLBLADDER",
+            "BILIARY", "PANCREAS", "SPLEEN", "KIDNEY", "RENAL", "ADRENAL"
+        ],
+        "pelvis": [
+            "PELVIS", "PELVIC", "BLADDER", "UTERUS", "OVARY",
+            "PROSTATE", "SCROTUM", "TESTICLE"
+        ],
+        "spine": [
+            "SPINE", "CERVICAL", "THORACIC", "LUMBAR", "SACRUM", "SACRAL"
+        ],
+        "neck": [
+            "NECK", "THYROID", "PARATHYROID", "SOFT TISSUE NECK"
+        ],
+        "cardiac": [
+            "CARDIAC", "HEART", "CORONARY", "MYO PERF"
+        ],
+        "breast": [
+            "BREAST", "MAMMO", "TOMO"
+        ],
+        "vascular": [
+            "ANGIO", "CTA", "MRA", "ARTERY", "ARTERIAL", "VEIN",
+            "VENOUS", "VASCULAR", "DOPPLER", "CAROTID", "AORTA"
+        ],
+        "extremity": [
+            "SHOULDER", "ELBOW", "WRIST", "HAND", "FINGER", "THUMB",
+            "HIP", "KNEE", "ANKLE", "FOOT", "TOE", "FEMUR", "TIBIA",
+            "FIBULA", "HUMERUS", "FOREARM", "CLAVICLE"
+        ],
     }
 
     matched = set()
+
     for region, keywords in region_keywords.items():
-        if any(k in desc for k in keywords):
+        if any(keyword in desc for keyword in keywords):
             matched.add(region)
 
     return "|".join(sorted(matched))
@@ -58,8 +127,10 @@ def token_similarity(a: str, b: str) -> float:
     b_tokens = set(normalize(b).split())
 
     stopwords = {
-        "WITH", "WITHOUT", "CONTRAST", "WO", "W", "LIMITED",
-        "EXAM", "STUDY", "LEFT", "RIGHT"
+        "WITH", "WITHOUT", "CONTRAST", "WO", "W", "AND", "OR",
+        "LIMITED", "EXAM", "STUDY", "LEFT", "RIGHT", "BILATERAL",
+        "PORTABLE", "AP", "PA", "LAT", "LATERAL", "VIEW", "VIEWS",
+        "MIN", "MINIMUM", "COMPLETE", "ONLY"
     }
 
     a_tokens -= stopwords
@@ -69,6 +140,19 @@ def token_similarity(a: str, b: str) -> float:
         return 0.0
 
     return len(a_tokens & b_tokens) / len(a_tokens | b_tokens)
+
+
+def get_laterality(desc: str) -> str:
+    desc = f" {normalize(desc)} "
+
+    if " BILATERAL " in desc:
+        return "B"
+    if " LEFT " in desc:
+        return "L"
+    if " RIGHT " in desc:
+        return "R"
+
+    return ""
 
 
 def is_relevant(current: Dict[str, Any], prior: Dict[str, Any]) -> bool:
@@ -84,29 +168,71 @@ def is_relevant(current: Dict[str, Any], prior: Dict[str, Any]) -> bool:
     cur_region = get_body_region(cur_norm)
     prior_region = get_body_region(prior_norm)
 
+    cur_regions = set(cur_region.split("|")) if cur_region else set()
+    prior_regions = set(prior_region.split("|")) if prior_region else set()
+    overlap = cur_regions & prior_regions
+
     similarity = token_similarity(cur_norm, prior_norm)
 
-    # Strong match: same/similar exam description
-    if similarity >= 0.35:
+    cur_laterality = get_laterality(cur_norm)
+    prior_laterality = get_laterality(prior_norm)
+
+    # Exact same normalized study description.
+    if cur_norm == prior_norm:
         return True
 
-    # Same body region is usually relevant
-    if cur_region and prior_region:
-        cur_regions = set(cur_region.split("|"))
-        prior_regions = set(prior_region.split("|"))
-        if cur_regions & prior_regions:
+    # Very similar descriptions are usually relevant.
+    if similarity >= 0.40:
+        return True
+
+    # For extremities, left/right mismatch is usually not relevant.
+    if (
+        "extremity" in cur_regions
+        and "extremity" in prior_regions
+        and cur_laterality
+        and prior_laterality
+        and cur_laterality != prior_laterality
+        and "B" not in {cur_laterality, prior_laterality}
+        and similarity < 0.55
+    ):
+        return False
+
+    # Same modality + same body region is a strong signal.
+    if overlap and cur_modality == prior_modality:
+        return True
+
+    # Chest CT/XR priors are often useful across CT and XR.
+    if (
+        "chest" in overlap
+        and cur_modality in {"CT", "XR", "CTA"}
+        and prior_modality in {"CT", "XR", "CTA"}
+    ):
+        return True
+
+    # Breast priors are usually relevant to current breast studies.
+    if "breast" in overlap:
+        return True
+
+    # Brain/head cross-modality can create false positives, so require similarity.
+    if "brain_head" in overlap:
+        if cur_modality == prior_modality:
             return True
+        return similarity >= 0.30
 
-    # Special common cross-modality brain/head comparison
-    if "brain_head" in cur_region and "brain_head" in prior_region:
+    # Abdomen and pelvis are related, but require some text overlap across modalities.
+    if ("abdomen" in overlap or "pelvis" in overlap) and similarity >= 0.25:
         return True
 
-    # Chest XR/CT often useful for comparison
-    if "chest" in cur_region and "chest" in prior_region:
+    # Vascular studies are often relevant when both are vascular.
+    if "vascular" in overlap and similarity >= 0.20:
         return True
 
-    # Same modality alone is not enough if body region differs
-    if cur_modality and cur_modality == prior_modality and similarity >= 0.2:
+    # Cardiac studies are often relevant when both are cardiac.
+    if "cardiac" in overlap and similarity >= 0.20:
+        return True
+
+    # Same modality with moderate textual overlap.
+    if cur_modality and cur_modality == prior_modality and similarity >= 0.25:
         return True
 
     return False
@@ -119,9 +245,19 @@ def health_check():
 
 @app.post("/predict")
 def predict(payload: Dict[str, Any]):
+    cases = payload.get("cases", [])
+    prior_count = sum(len(case.get("prior_studies", [])) for case in cases)
+
+    logger.info(
+        "request_id=%s case_count=%s prior_count=%s",
+        payload.get("request_id", "no-request-id"),
+        len(cases),
+        prior_count,
+    )
+
     predictions = []
 
-    for case in payload.get("cases", []):
+    for case in cases:
         case_id = case.get("case_id")
         current_study = case.get("current_study", {})
         prior_studies = case.get("prior_studies", [])
